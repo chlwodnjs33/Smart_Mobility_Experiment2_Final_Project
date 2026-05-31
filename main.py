@@ -10,8 +10,7 @@ from scipy.optimize import least_squares
 # 1. Geometric RANSAC Anchor — C(18,3) = 816 전수 탐색
 # ═══════════════════════════════════════════════════════════════════════════
 
-_ALL_COMBS = list(combinations(range(18), 3))
-_COMBS = [_ALL_COMBS[i] for i in np.random.RandomState(42).permutation(816)]
+_COMBS = list(combinations(range(18), 3))
 
 
 def multilateration_3bs(p1, p2, p3, d1, d2, d3):

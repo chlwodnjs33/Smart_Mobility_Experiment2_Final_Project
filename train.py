@@ -6,8 +6,8 @@ train.py — IRAC: Iterative RANSAC-Correct + Symmetric Augmentation Residual Le
      단방향 부등식으로 활용, C(18,3)=816 전수 탐색하여 물리적 일관 BS 선별
   2. 반복적 NLOS 보정 루프 (3회): RANSAC → 바이어스 추정 → RTT 보정 → 재탐색
   3. 대칭 데이터 증강: 6x3 BS 그리드 대칭으로 700 → 2800 샘플
-  4. 89D Feature + GBR 잔차 학습 (depth=3)
-  5. p_hat = irac_anchor + GBR_residual
+  4. 88D Feature + Huber 회귀 잔차 보정 (outlier-robust 선형, 트리 모델 대비 OOF 우수)
+  5. p_hat = irac_anchor + Huber_residual
 """
 
 import numpy as np
@@ -16,7 +16,9 @@ import pickle
 import time
 from itertools import combinations
 from scipy.optimize import least_squares
-from sklearn.ensemble import GradientBoostingRegressor
+from sklearn.linear_model import HuberRegressor
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.model_selection import KFold
 from sklearn.base import clone
@@ -26,9 +28,8 @@ from sklearn.base import clone
 # 1. Physics: Geometric RANSAC Anchor
 # ═══════════════════════════════════════════════════════════════════════════
 
-# C(18,3) = 816 조합 — seed=42 순열로 고정 (재현성 + 최적 tiebreak)
-_ALL_COMBS = list(combinations(range(18), 3))
-_COMBS = [_ALL_COMBS[i] for i in np.random.RandomState(42).permutation(816)]
+# C(18,3) = 816 조합 — 자연 순서로 전수 탐색 (시드 비의존, 재현성 보장)
+_COMBS = list(combinations(range(18), 3))
 
 
 def multilateration_3bs(p1, p2, p3, d1, d2, d3):
@@ -216,9 +217,13 @@ def main():
     print('\n5-Fold OOF Cross-Validation...')
     kf = KFold(n_splits=5, shuffle=True, random_state=42)
 
-    model_proto = MultiOutputRegressor(GradientBoostingRegressor(
-        n_estimators=200, learning_rate=0.03, max_depth=3,
-        subsample=0.8, random_state=42,
+    # Huber 회귀: outlier(큰 NLOS 잔차)에 강건한 선형 모델.
+    # 트리 모델(GBR/RF)은 anchor 잔차의 노이즈를 과적합하여 OOF가 악화되는 반면,
+    # Huber loss는 노이즈에 휘둘리지 않고 체계적 선형 성분만 보정한다.
+    # 입력 스케일 차이가 크므로 StandardScaler로 표준화 후 적용.
+    model_proto = MultiOutputRegressor(make_pipeline(
+        StandardScaler(),
+        HuberRegressor(epsilon=1.35, alpha=0.001, max_iter=2000),
     ))
 
     oof_preds = np.zeros_like(y)
@@ -284,7 +289,7 @@ def main():
 
     # ── 저장 ────────────────────────────────────────────────────────────
     payload = {
-        'type': 'irac_residual',
+        'type': 'irac_huber_residual',
         'model': final_model,
         'noise_margin': 3.0,
         'n_iter': 3,
