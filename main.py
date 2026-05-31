@@ -173,18 +173,15 @@ def main():
     mat_path = 'DH_FR1.mat'
 
     data = sio.loadmat(mat_path, squeeze_me=False)
-    if 'p_bs' in data:
-        p_bs = np.asarray(data['p_bs'], dtype=float)
-    else:
-        p_bs = np.asarray(data['BS_positions'], dtype=float)
-    d_hat = np.asarray(data['d_hat'], dtype=float)
-    p     = np.asarray(data['p'],     dtype=float)
+    BS_positions   = np.asarray(data['BS_positions'], dtype=float)     # (2, 18)
+    d_hat  = np.asarray(data['d_hat'], dtype=float)    # (18, num_user)
+    p      = np.asarray(data['p'],     dtype=float)    # (2, num_user) — GT 위치
 
     # 2) 본인 알고리즘 — 사용자 수는 입력에서 동적으로 받기
     num_user = d_hat.shape[1]
     p_hat = np.zeros((2, num_user))
     for u in range(num_user):
-        p_hat[:, u] = your_algorithm(d_hat[:, u], p_bs)
+        p_hat[:, u] = your_algorithm(d_hat[:, u], BS_positions)
 
     # 3) 결과 반환 — numpy 배열, 모양 (2, num_user)
     return p_hat
