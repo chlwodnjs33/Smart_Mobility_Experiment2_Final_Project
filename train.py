@@ -209,8 +209,13 @@ def main():
     print('IRAC Anchor 계산 중 (816 전수탐색, 3회 반복, alpha=0.9)...')
     t0 = time.time()
     anchors_orig, inliers_orig = compute_irac_anchors(d_hat, p_bs)
-    anchor_rmse = float(np.mean(np.sqrt(np.sum((anchors_orig - y) ** 2, axis=1))))
-    print(f'  IRAC Anchor RMSE: {anchor_rmse:.4f} m ({time.time()-t0:.1f}s)')
+    # 평가 지표: 사용자별 2D 위치 오차 ||p_hat - p||의 분포로부터
+    #   MPE  = mean(오차)        = 평균 위치 오차 (대표값, outlier에 둔감)
+    #   RMSE = sqrt(mean(오차^2)) = 제곱평균제곱근 (outlier에 민감)
+    err_anchor = np.sqrt(np.sum((anchors_orig - y) ** 2, axis=1))
+    anchor_mpe = float(err_anchor.mean())
+    anchor_rmse = float(np.sqrt((err_anchor ** 2).mean()))
+    print(f'  IRAC Anchor 평균오차(MPE): {anchor_mpe:.4f} m | RMSE: {anchor_rmse:.4f} m ({time.time()-t0:.1f}s)')
     print(f'  평균 inlier 수  : {inliers_orig.mean():.1f} / 18')
 
     # ── OOF Cross-Validation ──────────────────────────────────────────
@@ -261,15 +266,17 @@ def main():
         print(f'  Fold {fold+1}: Train {tr_rmse:.4f}m | Val {va_rmse:.4f}m '
               f'(gap {va_rmse - tr_rmse:.4f}m)')
 
-    oof_rmse = float(np.mean(np.sqrt(np.sum((oof_preds - y) ** 2, axis=1))))
+    err_oof = np.sqrt(np.sum((oof_preds - y) ** 2, axis=1))
+    oof_mpe = float(err_oof.mean())
+    oof_rmse = float(np.sqrt((err_oof ** 2).mean()))
     avg_train = np.mean(train_rmses)
     avg_val = np.mean(val_rmses)
 
-    print(f'\n  ── OOF 종합 ──')
-    print(f'  Train RMSE 평균 : {avg_train:.4f} m')
-    print(f'  Val RMSE 평균   : {avg_val:.4f} m')
-    print(f'  과적합 갭       : {avg_val - avg_train:.4f} m')
-    print(f'  OOF 전체 RMSE   : {oof_rmse:.4f} m  ← hidden test 예상치')
+    print(f'\n  ── OOF 종합 (평균오차 MPE 기준) ──')
+    print(f'  Train 평균오차 : {avg_train:.4f} m')
+    print(f'  Val 평균오차   : {avg_val:.4f} m')
+    print(f'  과적합 갭      : {avg_val - avg_train:.4f} m')
+    print(f'  OOF 평균오차(MPE) : {oof_mpe:.4f} m | OOF RMSE: {oof_rmse:.4f} m  ← hidden test 예상치')
 
     # ── 전체 데이터로 최종 모델 학습 ──────────────────────────────────
     print('\n전체 데이터로 최종 모델 학습 (대칭 증강 포함)...')
@@ -284,8 +291,8 @@ def main():
 
     final_pred = final_model.predict(X_all)
     final_pos = anchors_aug + final_pred
-    final_rmse = float(np.mean(np.sqrt(np.sum((final_pos - y_aug) ** 2, axis=1))))
-    print(f'  전체 학습 Train RMSE: {final_rmse:.4f} m')
+    final_mpe = float(np.mean(np.sqrt(np.sum((final_pos - y_aug) ** 2, axis=1))))
+    print(f'  전체 학습 Train 평균오차(MPE): {final_mpe:.4f} m')
 
     # ── 저장 ────────────────────────────────────────────────────────────
     payload = {
@@ -294,7 +301,9 @@ def main():
         'noise_margin': 3.0,
         'n_iter': 3,
         'alpha': 0.9,
+        'oof_mpe': oof_mpe,
         'oof_rmse': oof_rmse,
+        'anchor_mpe': anchor_mpe,
         'anchor_rmse': anchor_rmse,
     }
     with open('model.pkl', 'wb') as f:
@@ -303,8 +312,8 @@ def main():
     elapsed = time.time() - t_start
     print(f'\n{"="*50}')
     print(f'  저장 완료: model.pkl')
-    print(f'  IRAC Anchor RMSE   : {anchor_rmse:.4f} m')
-    print(f'  OOF RMSE (test 추정) : {oof_rmse:.4f} m')
+    print(f'  IRAC Anchor 평균오차 : {anchor_mpe:.4f} m (RMSE {anchor_rmse:.4f} m)')
+    print(f'  OOF 평균오차 (test 추정) : {oof_mpe:.4f} m (RMSE {oof_rmse:.4f} m)')
     print(f'  과적합 갭            : {avg_val - avg_train:.4f} m')
     print(f'  총 소요 시간         : {elapsed:.1f}s')
     print(f'{"="*50}')
