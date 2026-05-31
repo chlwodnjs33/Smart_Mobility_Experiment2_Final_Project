@@ -1,16 +1,13 @@
 """
-train.py — Iterative RANSAC-Correct + Symmetric Augmentation Residual Learning
+train.py — IRAC: Iterative RANSAC-Correct + Symmetric Augmentation Residual Learning
 
-알고리즘 구조 (IRAC: Iterative RANSAC-Correct):
-  1. Geometric RANSAC Anchor: NLOS 양의 바이어스 물리 제약(||x-p_i|| ≤ d_i)을
-     단방향 부등식으로 활용하여 C(18,3) 조합 중 물리적으로 일관된 BS 부분집합을
-     선별하고, inlier BS만으로 정밀 위치 추정
-  2. 반복적 NLOS 보정 루프: RANSAC 추정 위치 → NLOS 바이어스 추정 → RTT 부분 보정
-     → 보정된 RTT로 다시 RANSAC → 수렴까지 반복 (3회)
-  3. 대칭 데이터 증강: 6×3 BS 그리드의 X축/Y축/원점 대칭을 이용하여
-     700 → 2800 샘플로 4배 증강
-  4. 88D Feature 추출 + GBR 잔차 학습 (얕은 depth=3으로 정규화)
-  5. p_hat = iterative_ransac_anchor + GBR_residual
+알고리즘 구조:
+  1. Geometric RANSAC Anchor: NLOS 양의 바이어스 물리 제약(||x-p_i|| <= d_i)을
+     단방향 부등식으로 활용, C(18,3)=816 전수 탐색하여 물리적 일관 BS 선별
+  2. 반복적 NLOS 보정 루프 (3회): RANSAC → 바이어스 추정 → RTT 보정 → 재탐색
+  3. 대칭 데이터 증강: 6x3 BS 그리드 대칭으로 700 → 2800 샘플
+  4. 89D Feature + GBR 잔차 학습 (depth=3)
+  5. p_hat = irac_anchor + GBR_residual
 """
 
 import numpy as np
@@ -29,8 +26,13 @@ from sklearn.base import clone
 # 1. Physics: Geometric RANSAC Anchor
 # ═══════════════════════════════════════════════════════════════════════════
 
+# C(18,3) = 816 조합 — seed=42 순열로 고정 (재현성 + 최적 tiebreak)
+_ALL_COMBS = list(combinations(range(18), 3))
+_COMBS = [_ALL_COMBS[i] for i in np.random.RandomState(42).permutation(816)]
+
+
 def multilateration_3bs(p1, p2, p3, d1, d2, d3):
-    """3개 BS 좌표와 거리로 2D 위치 추정 (원의 교차 선형화)."""
+    """3개 BS 좌표와 거리로 2D 위치 추정."""
     A = np.array([
         [2 * (p2[0] - p1[0]), 2 * (p2[1] - p1[1])],
         [2 * (p3[0] - p1[0]), 2 * (p3[1] - p1[1])],
@@ -45,26 +47,16 @@ def multilateration_3bs(p1, p2, p3, d1, d2, d3):
         return None
 
 
-def geometric_ransac_anchor(d, p_bs, noise_margin=3.0, max_iter=150):
+def geometric_ransac_anchor(d, p_bs, noise_margin=3.0):
     """
-    Geometric RANSAC Consensus Anchor.
-
-    핵심 원리: NLOS 환경에서 RTT 측정값은 항상 실제 거리 이상이므로
-    (d_measured >= d_true), 올바른 위치 x에서는 모든 BS i에 대해
-    ||x - p_bs_i|| <= d_hat_i + noise_margin 이 성립해야 함.
-    이 단방향 부등식 위반 횟수를 최소화하는 위치를 찾음.
+    Geometric RANSAC — C(18,3) = 816 전수 탐색.
+    Returns: (pos, n_inliers)
     """
-    n_bs = len(d)
     best_pos = None
     best_inliers = np.array([], dtype=int)
     best_violation_count = 999
 
-    comb = list(combinations(range(n_bs), 3))
-    rng = np.random.RandomState(42)
-    selected = rng.choice(len(comb), min(max_iter, len(comb)), replace=False)
-
-    for idx in selected:
-        bs_idx = comb[idx]
+    for bs_idx in _COMBS:
         pos = multilateration_3bs(
             p_bs[:, bs_idx[0]], p_bs[:, bs_idx[1]], p_bs[:, bs_idx[2]],
             d[bs_idx[0]], d[bs_idx[1]], d[bs_idx[2]],
@@ -103,58 +95,35 @@ def geometric_ransac_anchor(d, p_bs, noise_margin=3.0, max_iter=150):
 # 2. Iterative RANSAC-Correct Loop
 # ═══════════════════════════════════════════════════════════════════════════
 
-def iterative_ransac_correct(d, p_bs, n_iter=3, alpha=0.9,
-                              noise_margin=3.0, max_ransac_iter=816):
+def iterative_ransac_correct(d, p_bs, n_iter=3, alpha=0.9, noise_margin=3.0):
     """
     반복적 RANSAC-Correct 루프.
-
-    핵심 아이디어: NLOS 바이어스는 항상 양수이므로, 추정 위치에서 계산한
-    '예측 거리'와 '측정 거리'의 양의 차이가 곧 NLOS 바이어스 추정치임.
-    이를 부분적으로(alpha 비율) 차감한 보정 RTT로 다시 RANSAC을 수행하면
-    더 정확한 위치를 얻을 수 있고, 이 과정을 반복하면 수렴함.
-
-    Step 1: RANSAC으로 초기 위치 추정
-    Step 2: 추정 위치에서 NLOS 바이어스 추정 (양수만 취함)
-    Step 3: RTT 부분 보정 (alpha 비율만큼 차감)
-    Step 4: 보정된 RTT로 다시 RANSAC
-    → 수렴까지 반복 (기본 3회)
+    Returns: (pos, n_inliers)
     """
     d_current = d.copy()
     pos = None
     n_inliers = 0
 
     for _ in range(n_iter):
-        # RANSAC으로 현재 RTT 기반 위치 추정
-        pos, n_inliers = geometric_ransac_anchor(
-            d_current, p_bs, noise_margin, max_ransac_iter
-        )
-
-        # 추정 위치에서 각 BS까지의 기하학적 거리
+        pos, n_inliers = geometric_ransac_anchor(d_current, p_bs, noise_margin)
         est_ranges = np.sqrt(np.sum((p_bs.T - pos) ** 2, axis=1))
-
-        # NLOS 바이어스 추정: 양수인 것만 (NLOS는 항상 양의 바이어스)
         bias = np.maximum(0, d_current - est_ranges)
-
-        # 원본 RTT에서 alpha 비율만큼 바이어스 차감
         d_current = d - alpha * bias
-
-        # 음수 방지 (물리적으로 거리는 항상 양수)
         d_current = np.maximum(d_current, 0.1)
 
-    return pos, n_inliers, d_current
+    return pos, n_inliers
 
 
-def compute_iterative_ransac_anchors(d_hat, p_bs, n_iter=3, alpha=0.9,
-                                      noise_margin=3.0, max_ransac_iter=816):
-    """전체 사용자에 대해 Iterative RANSAC-Correct anchor 계산 → anchors (N,2), d_corrected (18,N)."""
+def compute_irac_anchors(d_hat, p_bs, n_iter=3, alpha=0.9, noise_margin=3.0):
+    """전체 사용자: anchors (N,2), n_inliers_arr (N,)."""
     N = d_hat.shape[1]
     anchors = np.zeros((N, 2))
-    d_corrected = np.zeros_like(d_hat)
+    n_inliers_arr = np.zeros(N)
     for u in range(N):
-        anchors[u], _, d_corrected[:, u] = iterative_ransac_correct(
-            d_hat[:, u], p_bs, n_iter, alpha, noise_margin, max_ransac_iter
+        anchors[u], n_inliers_arr[u] = iterative_ransac_correct(
+            d_hat[:, u], p_bs, n_iter, alpha, noise_margin
         )
-    return anchors, d_corrected
+    return anchors, n_inliers_arr
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -167,15 +136,11 @@ ORIGIN_SYM_MAP = [17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0]
 
 
 def augment_symmetric(d_hat, y):
-    """
-    BS 그리드 대칭을 이용한 4배 데이터 증강.
-    (x,y) → 원본, (-x,y), (x,-y), (-x,-y) 의 4가지 대칭 변환.
-    """
-    d0, y0 = d_hat, y
+    """4배 대칭 증강: 원본 + X축 + Y축 + 원점."""
     d1 = d_hat[X_SYM_MAP, :];  y1 = y.copy(); y1[:, 0] = -y1[:, 0]
     d2 = d_hat[Y_SYM_MAP, :];  y2 = y.copy(); y2[:, 1] = -y2[:, 1]
-    d3 = d_hat[ORIGIN_SYM_MAP, :];  y3 = -y
-    return np.hstack([d0, d1, d2, d3]), np.vstack([y0, y1, y2, y3])
+    d3 = d_hat[ORIGIN_SYM_MAP, :]; y3 = -y
+    return np.hstack([d_hat, d1, d2, d3]), np.vstack([y, y1, y2, y3])
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -188,8 +153,8 @@ def make_features(d_hat, p_bs, anchors):
     raw RTT(18) + anchor(2) + range_residual(18) + abs_residual(18)
     + statistics(11) + rank(18) + top3_pair_diffs(3) = 88
     """
-    raw = d_hat.T
-    bs = p_bs.T
+    raw = d_hat.T           # (N, 18)
+    bs = p_bs.T             # (18, 2)
 
     anchor_ranges = np.sqrt(
         np.sum((anchors[:, None, :] - bs[None, :, :]) ** 2, axis=2)
@@ -219,7 +184,7 @@ def make_features(d_hat, p_bs, anchors):
     X = np.hstack([
         raw, anchors, range_residual, np.abs(range_residual),
         stats, rank, pair_diffs,
-    ])
+    ])                                   # (N, 88)
     return X
 
 
@@ -239,12 +204,13 @@ def main():
 
     print(f'데이터 로드 완료: {d_hat.shape[1]}명')
 
-    # ── Iterative RANSAC-Correct Anchor (원본 700명) ──────────────────
-    print('Iterative RANSAC-Correct Anchor 계산 중 (전수탐색 816개, 2회 반복, alpha=0.9)...')
+    # ── IRAC Anchor (원본 700명) ──────────────────────────────────────
+    print('IRAC Anchor 계산 중 (816 전수탐색, 3회 반복, alpha=0.9)...')
     t0 = time.time()
-    anchors_orig, _ = compute_iterative_ransac_anchors(d_hat, p_bs)
+    anchors_orig, inliers_orig = compute_irac_anchors(d_hat, p_bs)
     anchor_rmse = float(np.mean(np.sqrt(np.sum((anchors_orig - y) ** 2, axis=1))))
-    print(f'  Iterative RANSAC Anchor RMSE: {anchor_rmse:.4f} m ({time.time()-t0:.1f}s)')
+    print(f'  IRAC Anchor RMSE: {anchor_rmse:.4f} m ({time.time()-t0:.1f}s)')
+    print(f'  평균 inlier 수  : {inliers_orig.mean():.1f} / 18')
 
     # ── OOF Cross-Validation ──────────────────────────────────────────
     print('\n5-Fold OOF Cross-Validation...')
@@ -263,17 +229,13 @@ def main():
         # Train fold: 대칭 증강
         d_hat_tr_aug, y_tr_aug = augment_symmetric(d_hat[:, tr_idx], y[tr_idx])
 
-        # Iterative RANSAC anchor (증강 데이터)
-        anchors_tr, _ = compute_iterative_ransac_anchors(
-            d_hat_tr_aug, p_bs
-        )
+        # IRAC anchor (증강 데이터)
+        anchors_tr, _ = compute_irac_anchors(d_hat_tr_aug, p_bs)
         X_tr = make_features(d_hat_tr_aug, p_bs, anchors_tr)
         res_tr = y_tr_aug - anchors_tr
 
         # Validation fold: 원본만
-        anchors_va, _ = compute_iterative_ransac_anchors(
-            d_hat[:, va_idx], p_bs
-        )
+        anchors_va, _ = compute_irac_anchors(d_hat[:, va_idx], p_bs)
         X_va = make_features(d_hat[:, va_idx], p_bs, anchors_va)
 
         m = clone(model_proto)
@@ -307,7 +269,7 @@ def main():
     # ── 전체 데이터로 최종 모델 학습 ──────────────────────────────────
     print('\n전체 데이터로 최종 모델 학습 (대칭 증강 포함)...')
     d_hat_aug, y_aug = augment_symmetric(d_hat, y)
-    anchors_aug, _ = compute_iterative_ransac_anchors(d_hat_aug, p_bs)
+    anchors_aug, _ = compute_irac_anchors(d_hat_aug, p_bs)
 
     X_all = make_features(d_hat_aug, p_bs, anchors_aug)
     res_all = y_aug - anchors_aug
@@ -325,7 +287,6 @@ def main():
         'type': 'irac_residual',
         'model': final_model,
         'noise_margin': 3.0,
-        'max_iter': 816,
         'n_iter': 3,
         'alpha': 0.9,
         'oof_rmse': oof_rmse,
@@ -337,10 +298,10 @@ def main():
     elapsed = time.time() - t_start
     print(f'\n{"="*50}')
     print(f'  저장 완료: model.pkl')
-    print(f'  Iterative RANSAC Anchor RMSE : {anchor_rmse:.4f} m')
-    print(f'  OOF RMSE (test 추정)         : {oof_rmse:.4f} m')
-    print(f'  과적합 갭                    : {avg_val - avg_train:.4f} m')
-    print(f'  총 소요 시간                 : {elapsed:.1f}s')
+    print(f'  IRAC Anchor RMSE   : {anchor_rmse:.4f} m')
+    print(f'  OOF RMSE (test 추정) : {oof_rmse:.4f} m')
+    print(f'  과적합 갭            : {avg_val - avg_train:.4f} m')
+    print(f'  총 소요 시간         : {elapsed:.1f}s')
     print(f'{"="*50}')
 
 
