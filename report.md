@@ -1,5 +1,9 @@
 # IRAC: 단방향 NLOS 제약과 격자 대칭 증강을 결합한 Iterative RANSAC-Correct 측위
 
+| 학번 | 이름 |
+|------|------|
+| 12223654 | 최재원 |
+
 ## 1. 모티베이션 & 인트로
 
 ### 1.1 문제 정의와 초기 실험
@@ -160,7 +164,7 @@ NLOS 바이어스를 명시적으로 다루는 기존 연구로 SDP(Semidefinite
 
 ### 3.1 사용한 Agent AI
 
-Anthropic의 Claude Code(Claude 4 계열 모델)를 개발 전 과정의 주요 도구로 활용하였다. 데이터 분석, 파라미터 탐색, 코드 구현, 원인 분석을 모두 Claude Code와의 대화를 통해 수행하였으며, 알고리즘의 설계 결정은 본인이 담당하였다.
+Claude Code를 개발 전 과정의 주요 도구로 활용하였다. 데이터 분석, 파라미터 탐색, 코드 구현, 원인 분석을 모두 Claude Code와의 대화를 통해 수행하였으며, 알고리즘의 설계 결정은 본인이 담당하였다.
 
 ### 3.2 AI의 역할
 
@@ -296,12 +300,30 @@ ML 보정 단계까지 포함한 최종 모델과 Cauchy NLS의 비교도 fair�
 
 ## 5. Reference
 
-본 알고리즘과 각 논문의 차이점은 §2.4에 상세히 기재하였다.
+본 프로젝트는 특정 논문의 알고리즘을 그대로 재현한 것이 아니라, NLOS 측정 오차 처리·RANSAC 기반 inlier 선별·NLOS 바이어스 보정·데이터 증강의 핵심 개념을 참고한 뒤 본 과제의 18개 기지국 RTT 데이터에 맞게 변형하였다. 아래 표는 각 reference에서 참고한 내용과 본 프로젝트에서 직접 설계·구현한 부분을 구분한 것이다(알고리즘 차이의 수식·절차 수준 상세는 §2.4 참조).
 
-1. Güvenç, I., Chong, C.-C., Watanabe, F., and Inamura, H. (2008). "NLOS Identification and Weighted Least-Squares Localization for UWB Systems Using Multipath Channel Statistics," EURASIP Journal on Advances in Signal Processing, Article ID 271984.
+| Reference | 참고한 내용 | 본 프로젝트에서 직접 설계·구현한 부분 |
+|-----------|-------------|----------------------------------------|
+| **[1]** Fischler & Bolles (1981), RANSAC | 최소 표본으로 모델 후보를 만들고, 데이터와의 합의(inlier)가 가장 큰 후보를 택해 outlier에 강건하게 적합하는 RANSAC 프레임워크. 본 알고리즘 Stage 1의 골격으로 사용하였다. | 표준 RANSAC의 양방향 잔차 기준 대신 NLOS 양의 바이어스를 반영한 **단방향 부등식 위반 횟수**를 합의 척도로 정의하였다. 또한 $C(18,3)=816$ 조합이 작다는 점을 이용해 무작위 샘플링이 아닌 **전수 탐색**으로 후보를 평가하였다. |
+| **[2]** Güvenç et al. (2008), NLOS 식별 + WLS | NLOS가 측위 오차의 주원인이며, 모든 기지국을 동일하게 쓰기보다 기지국별 신뢰도를 차등 반영해야 한다는 문제의식. 중간 발표의 Robust WLS baseline이 이 접근을 따랐다. | NLOS를 별도 분류기로 먼저 식별하지 않고, NLOS RTT가 실제 거리보다 주로 크게 나타나는 성질을 **단방향 물리 제약**으로 RANSAC 평가에 직접 통합하였다. 가중치 조절이 아니라 residual 기준 inlier만 정밀화 단계에 사용한다. |
+| **[3]** Vaghefi & Buehrer (2015), SDP 기반 NLOS 보정 | NLOS 오차를 단순 노이즈가 아니라 측정 거리를 키우는 **양의 bias**로 명시적으로 모델링한다는 관점. | SDP 같은 무거운 볼록 최적화 대신, 추정 위치에서 bias를 역추정하고 RTT를 차감한 뒤 다시 탐색하는 **경량 반복 보정(IRAC) 루프**로 단순화하여 실행 시간 제한에 맞췄다. |
+| **[4]** Zhang et al. (2018), mixup | 학습 데이터가 적을 때 데이터 증강으로 일반화 성능을 높인다는 방향. | 확률적 보간(mixup)이나 임의 noise가 아니라, 기지국 6×3 격자의 대칭성에서 RTT–위치 변환을 유도하는 **결정적(deterministic) 증강**을 설계하였다. |
 
-2. Vaghefi, R. M. and Buehrer, R. M. (2015). "Cooperative Localization in NLOS Environments Using Semidefinite Programming," IEEE Communications Letters, vol. 19, no. 8, pp. 1382–1385.
+### 5.1 본 프로젝트의 종합 기여
 
-3. Zhang, H., Cissé, M., Dauphin, Y. N., and Lopez-Paz, D. (2018). "mixup: Beyond Empirical Risk Minimization," ICLR.
+위 개념들을 단순 조합하는 데 그치지 않고, 본 과제 데이터(18개 기지국 RTT, hidden test 평가) 특성에 맞게 다음을 직접 설계하였다.
 
-4. Fischler, M. A. and Bolles, R. C. (1981). "Random Sample Consensus: A Paradigm for Model Fitting with Applications to Image Analysis and Automated Cartography," Communications of the ACM.
+1. NLOS 양의 bias를 단방향 부등식 위반 횟수로 변환한 RANSAC 후보 평가 기준
+2. $C(18,3)=816$ 기지국 조합을 전수 탐색하는 Geometric RANSAC 구조
+3. 추정 위치에서 NLOS bias를 역추정해 RTT를 반복 보정하는 IRAC 루프
+4. 6×3 기지국 격자 대칭을 이용한 결정적 데이터 증강
+5. 트리 기반 모델의 과적합을 회피하기 위해 잔차 보정에 Huber 회귀를 채택한 구조
+
+따라서 본 알고리즘은 기존 WLS·일반 RANSAC·SDP 기반 NLOS 보정·일반 데이터 증강 기법을 그대로 적용한 것이 아니라, 본 과제의 데이터와 평가 조건에 맞게 물리 기반 위치 추정과 경량 residual 보정을 결합한 방식이다.
+
+### References
+
+1. Fischler, M. A. and Bolles, R. C. (1981). "Random Sample Consensus: A Paradigm for Model Fitting with Applications to Image Analysis and Automated Cartography," Communications of the ACM, 24(6), 381–395.
+2. Güvenç, I., Chong, C.-C., Watanabe, F., and Inamura, H. (2008). "NLOS Identification and Weighted Least-Squares Localization for UWB Systems Using Multipath Channel Statistics," EURASIP Journal on Advances in Signal Processing, Article ID 271984.
+3. Vaghefi, R. M. and Buehrer, R. M. (2015). "Cooperative Localization in NLOS Environments Using Semidefinite Programming," IEEE Communications Letters, 19(8), 1382–1385.
+4. Zhang, H., Cissé, M., Dauphin, Y. N., and Lopez-Paz, D. (2018). "mixup: Beyond Empirical Risk Minimization," ICLR.
